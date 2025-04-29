@@ -638,6 +638,9 @@ async def mute(
     if not interaction.user.guild_permissions.moderate_members:
         return await interaction.response.send_message("❌ У вас немає прав на це", ephemeral=True)
     
+    # Відкладаємо відповідь
+    await interaction.response.defer(ephemeral=True)
+    
     # Перевірка чи є роль для мута
     mute_role = None
     if interaction.guild.id in mute_roles:
@@ -661,7 +664,7 @@ async def mute(
             
             mute_roles[interaction.guild.id] = mute_role.id
         except discord.Forbidden:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ Не вдалося створити роль для мута",
                 ephemeral=True
             )
@@ -679,12 +682,12 @@ async def mute(
         elif unit == 'd':
             duration_seconds = value * 86400
         else:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "❌ Невірний формат тривалості. Використовуйте: 30m, 1h, 1d",
                 ephemeral=True
             )
     except ValueError:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "❌ Невірний формат тривалості",
             ephemeral=True
         )
@@ -721,7 +724,7 @@ async def mute(
         embed.add_field(name="Буде розблоковано", value=f"<t:{int(unmute_time.timestamp())}:F>", inline=False)
         
         # Надсилаємо повідомлення
-        await interaction.response.send_message(embed=embed)
+        await interaction.followup.send(embed=embed)
         if log_channel:
             await log_channel.send(embed=embed)
         
@@ -735,8 +738,13 @@ async def mute(
             pass
             
     except discord.Forbidden:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ Не вдалося заблокувати користувача",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Сталася помилка: {str(e)}",
             ephemeral=True
         )
 
