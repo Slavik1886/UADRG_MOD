@@ -589,6 +589,16 @@ async def check_mutes():
     if to_unmute:
         save_mute_data()
 
+async def update_invite_cache(guild):
+    """Оновлюємо кеш запрошень для сервера"""
+    try:
+        invites = await guild.invites()
+        invite_cache[guild.id] = {invite.code: invite.uses for invite in invites}
+    except discord.Forbidden:
+        print(f"Немає дозволу на перегляд запрошень для сервера {guild.name}")
+    except Exception as e:
+        print(f"Помилка оновлення кешу запрошень: {e}")
+
 @bot.event
 async def on_ready():
     print(f'Бот {bot.user} онлайн!')
