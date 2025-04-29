@@ -1083,5 +1083,82 @@ async def dis_stat(
     
     await interaction.followup.send(embed=embed)
 
+@tasks.loop(minutes=1)
+async def update_voice_activity():
+    """Оновлює лічильник часу проведеного в голосових каналах"""
+    global last_activity_update
+    now = datetime.utcnow()
+    time_elapsed = now - last_activity_update
+    last_activity_update = now
+    
+    for guild in bot.guilds:
+        for voice_channel in guild.voice_channels:
+            for member in voice_channel.members:
+                if not member.bot:
+                    voice_activity[member.id] += time_elapsed
+
+@tasks.loop(minutes=1)
+async def check_voice_activity():
+    """Перевіряє активність користувачів у голосових каналах"""
+    current_time = datetime.utcnow()
+    for guild_id, data in tracked_channels.items():
+        guild = bot.get_guild(guild_id)
+        if not guild:
+            continue
+            
+        voice_channel = guild.get_channel(data["voice_channel"])
+        log_channel = guild.get_channel(data["log_channel"])
+        if not voice_channel or not log_channel:
+            continue
+            
+        for member in voice_channel.members:
+            if member.bot:
+                continue
+                
+            member_key = f"{guild_id}_{member.id}"
+            
+            if member_key not in voice_time_tracker:
+                voice_time_tracker[member_key] = current_time
+                warning_sent.discard(member_key)
+                continue
+                
+            time_in_channel = current_time - voice_time_tracker[member_key]
+            
+            if time_in_channel > timedelta(minutes=10) and member_key not in warning_sent:
+                try:
+                    await member.send("⚠️ Ви в каналі для неактивних користувачів вже 10+ хвилин. ✅ Будьте активні, або Ви будете відєднані!")
+                    warning_sent.add(member_key)
+                except:
+                    pass
+            
+            if time_in_channel > timedelta(minutes=15):
+                try:
+                    await member.move_to(None)
+                    msg = await log_channel.send(f"🔴 {member.mention} відключено за неактивність на сервері")
+                    bot.loop.create_task(delete_after(msg, data["delete_after"]))
+                    del voice_time_tracker[member_key]
+                    warning_sent.discard(member_key)
+                except:
+                    pass
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Обробляє зміни стану голосового підключення"""
+    if before.channel and before.channel.id in [data["voice_channel"] for data in tracked_channels.values()]:
+        member_key = f"{member.guild.id}_{member.id}"
+        if member_key in voice_time_tracker:
+            del voice_time_tracker[member_key]
+            warning_sent.discard(member_key)
+
+async def delete_after(message, minutes):
+    """Видаляє повідомлення після вказаного часу"""
+    if minutes <= 0:
+        return
+    await asyncio.sleep(minutes * 60)
+    try:
+        await message.delete()
+    except:
+        pass
+
 if __name__ == '__main__':
     bot.run(DISCORD_TOKEN) 
