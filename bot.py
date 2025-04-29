@@ -563,20 +563,33 @@ async def check_mutes():
             if current_time >= unmute_time:
                 member = guild.get_member(user_id)
                 if member:
-                    mute_role = guild.get_role(mute_data['role_id'])
-                    if mute_role:
+                    # Отримуємо оригінальні ролі
+                    original_roles = []
+                    if 'original_roles' in mute_data:
+                        original_roles = [guild.get_role(role_id) for role_id in mute_data['original_roles']]
+                        original_roles = [role for role in original_roles if role is not None]
+                    
+                    try:
+                        # Повертаємо оригінальні ролі
+                        await member.edit(roles=original_roles, reason="Автоматичне зняття мута")
+                        
+                        log_channel = guild.get_channel(mute_data['log_channel']) if mute_data.get('log_channel') else None
+                        if log_channel:
+                            embed = discord.Embed(
+                                title="🔊 Користувача розмучено",
+                                description=f"Користувач {member.mention} автоматично розмучений",
+                                color=discord.Color.green()
+                            )
+                            await log_channel.send(embed=embed)
+                            
+                        # Надсилаємо приватне повідомлення користувачу
                         try:
-                            await member.remove_roles(mute_role)
-                            log_channel = guild.get_channel(mute_data['log_channel'])
-                            if log_channel:
-                                embed = discord.Embed(
-                                    title="🔊 Користувача розмучено",
-                                    description=f"Користувач {member.mention} автоматично розмучений",
-                                    color=discord.Color.green()
-                                )
-                                await log_channel.send(embed=embed)
-                        except discord.Forbidden:
-                            print(f"Не вдалося зняти мут з користувача {member.id} на сервері {guild.id}")
+                            await member.send(f"Ваш мут на сервері {guild.name} знято!")
+                        except:
+                            pass
+                            
+                    except discord.Forbidden:
+                        print(f"Не вдалося зняти мут з користувача {member.id} на сервері {guild.id}")
                 to_unmute.append((guild_id, user_id))
     
     # Видаляємо розмучених користувачів
@@ -621,6 +634,45 @@ async def on_ready():
     update_voice_activity.start()
     check_mutes.start()  # Додаємо перевірку мутів
 
+async def setup_mute_role(guild: discord.Guild) -> Optional[discord.Role]:
+    """Створює та налаштовує роль для мута"""
+    try:
+        # Створюємо роль з базовими налаштуваннями
+        mute_role = await guild.create_role(
+            name="Muted",
+            reason="Роль для мута користувачів",
+            color=discord.Color.dark_gray(),
+            permissions=discord.Permissions.none()  # Забираємо всі права
+        )
+        
+        # Налаштовуємо права для кожного каналу
+        for channel in guild.channels:
+            overwrites = {
+                mute_role: discord.PermissionOverwrite(
+                    send_messages=False,
+                    add_reactions=False,
+                    speak=False,
+                    stream=False,
+                    send_messages_in_threads=False,
+                    create_public_threads=False,
+                    create_private_threads=False,
+                    embed_links=False,
+                    attach_files=False,
+                    use_external_emojis=False,
+                    use_external_stickers=False,
+                    use_application_commands=False,
+                    send_tts_messages=False,
+                    manage_messages=False,
+                    manage_threads=False
+                )
+            }
+            await channel.edit(overwrites=overwrites, reason="Налаштування прав для ролі мута")
+        
+        return mute_role
+    except Exception as e:
+        print(f"Помилка створення ролі для мута: {e}")
+        return None
+
 @bot.tree.command(name="mute", description="Тимчасово заблокувати користувача")
 @app_commands.describe(
     member="Користувач для блокування",
@@ -638,6 +690,13 @@ async def mute(
     if not interaction.user.guild_permissions.moderate_members:
         return await interaction.response.send_message("❌ У вас немає прав на це", ephemeral=True)
     
+    # Перевіряємо чи модератор не намагається замутити власника сервера
+    if member.guild_permissions.administrator or member.guild.owner_id == member.id:
+        return await interaction.response.send_message(
+            "❌ Неможливо заблокувати адміністратора або власника сервера",
+            ephemeral=True
+        )
+    
     # Відкладаємо відповідь
     await interaction.response.defer(ephemeral=True)
     
@@ -645,29 +704,20 @@ async def mute(
     mute_role = None
     if interaction.guild.id in mute_roles:
         mute_role = interaction.guild.get_role(mute_roles[interaction.guild.id])
+        
+        # Перевіряємо чи роль все ще існує
+        if not mute_role:
+            mute_roles.pop(interaction.guild.id)
     
     if not mute_role:
         # Створюємо нову роль для мута
-        try:
-            mute_role = await interaction.guild.create_role(
-                name="Muted",
-                reason="Роль для мута користувачів"
-            )
-            
-            # Налаштовуємо дозволи для всіх текстових каналів
-            for channel in interaction.guild.channels:
-                if isinstance(channel, (discord.TextChannel, discord.VoiceChannel)):
-                    await channel.set_permissions(mute_role,
-                                               send_messages=False,
-                                               speak=False,
-                                               stream=False)
-            
-            mute_roles[interaction.guild.id] = mute_role.id
-        except discord.Forbidden:
+        mute_role = await setup_mute_role(interaction.guild)
+        if not mute_role:
             return await interaction.followup.send(
                 "❌ Не вдалося створити роль для мута",
                 ephemeral=True
             )
+        mute_roles[interaction.guild.id] = mute_role.id
     
     # Парсимо тривалість
     duration_seconds = 0
@@ -694,9 +744,13 @@ async def mute(
     
     unmute_time = datetime.utcnow() + timedelta(seconds=duration_seconds)
     
+    # Зберігаємо старі ролі користувача
+    user_roles = [role.id for role in member.roles if role != interaction.guild.default_role]
+    
     # Додаємо роль
     try:
-        await member.add_roles(mute_role, reason=reason)
+        # Знімаємо всі ролі
+        await member.edit(roles=[mute_role], reason=reason)
         
         # Зберігаємо інформацію про мут
         if interaction.guild.id not in muted_users:
@@ -706,7 +760,8 @@ async def mute(
             'unmute_time': unmute_time.isoformat(),
             'role_id': mute_role.id,
             'reason': reason,
-            'log_channel': log_channel.id if log_channel else None
+            'log_channel': log_channel.id if log_channel else None,
+            'original_roles': user_roles  # Зберігаємо оригінальні ролі
         }
         save_mute_data()
         
@@ -761,61 +816,68 @@ async def unmute(
     if not interaction.user.guild_permissions.moderate_members:
         return await interaction.response.send_message("❌ У вас немає прав на це", ephemeral=True)
     
+    await interaction.response.defer(ephemeral=True)
+    
     guild_mutes = muted_users.get(interaction.guild.id, {})
     if member.id not in guild_mutes:
-        return await interaction.response.send_message(
+        return await interaction.followup.send(
             "❌ Цей користувач не заблокований",
             ephemeral=True
         )
     
     mute_data = guild_mutes[member.id]
-    mute_role = interaction.guild.get_role(mute_data['role_id'])
     
-    if mute_role and mute_role in member.roles:
+    try:
+        # Отримуємо оригінальні ролі
+        original_roles = []
+        if 'original_roles' in mute_data:
+            original_roles = [interaction.guild.get_role(role_id) for role_id in mute_data['original_roles']]
+            original_roles = [role for role in original_roles if role is not None]
+        
+        # Повертаємо оригінальні ролі
+        await member.edit(roles=original_roles, reason=f"Розмут: {reason}")
+        
+        # Видаляємо з бази мутів
+        guild_mutes.pop(member.id)
+        if not guild_mutes:
+            muted_users.pop(interaction.guild.id)
+        save_mute_data()
+        
+        # Створюємо ембед
+        embed = discord.Embed(
+            title="🔊 Користувача розблоковано",
+            color=discord.Color.green(),
+            timestamp=datetime.utcnow()
+        )
+        
+        embed.add_field(name="Користувач", value=member.mention, inline=True)
+        embed.add_field(name="Модератор", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Причина", value=reason, inline=False)
+        
+        # Надсилаємо повідомлення
+        await interaction.followup.send(embed=embed)
+        
+        # Якщо є канал для логів
+        if 'log_channel' in mute_data and mute_data['log_channel']:
+            log_channel = interaction.guild.get_channel(mute_data['log_channel'])
+            if log_channel:
+                await log_channel.send(embed=embed)
+        
+        # Надсилаємо приватне повідомлення користувачу
         try:
-            await member.remove_roles(mute_role, reason=reason)
+            await member.send(f"Вас розблоковано на сервері {interaction.guild.name}\n"
+                            f"Причина: {reason}")
+        except:
+            pass
             
-            # Видаляємо з бази мутів
-            guild_mutes.pop(member.id)
-            if not guild_mutes:
-                muted_users.pop(interaction.guild.id)
-            save_mute_data()
-            
-            # Створюємо ембед
-            embed = discord.Embed(
-                title="🔊 Користувача розблоковано",
-                color=discord.Color.green(),
-                timestamp=datetime.utcnow()
-            )
-            
-            embed.add_field(name="Користувач", value=member.mention, inline=True)
-            embed.add_field(name="Модератор", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Причина", value=reason, inline=False)
-            
-            # Надсилаємо повідомлення
-            await interaction.response.send_message(embed=embed)
-            
-            # Якщо є канал для логів
-            if 'log_channel' in mute_data and mute_data['log_channel']:
-                log_channel = interaction.guild.get_channel(mute_data['log_channel'])
-                if log_channel:
-                    await log_channel.send(embed=embed)
-            
-            # Надсилаємо приватне повідомлення користувачу
-            try:
-                await member.send(f"Вас розблоковано на сервері {interaction.guild.name}\n"
-                                f"Причина: {reason}")
-            except:
-                pass
-                
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ Не вдалося розблокувати користувача",
-                ephemeral=True
-            )
-    else:
-        await interaction.response.send_message(
-            "❌ Не вдалося знайти роль для мута",
+    except discord.Forbidden:
+        await interaction.followup.send(
+            "❌ Не вдалося розблокувати користувача",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Сталася помилка: {str(e)}",
             ephemeral=True
         )
 
